@@ -1,0 +1,35 @@
+﻿///$tab ActivateVariables
+/************************************************************************************************************************************************************
+
+	SUBROUTINE: 	ActivateVariables('VariableTable','VariableField','ExpressionField')
+	DESCRIPTION: 	Subroutine to generate variables with the name of one field and the value of another. 
+					
+	Dependencies:	None
+									
+	USAGE: 			CALL ActivateVaraibles('Variables','Variable','Expression');
+	
+	Version Infomation:
+		
+		1.0 		Initial build.  
+		
+
+*************************************************************************************************************************************************************/
+	
+Sub ActivateVariables(pTable, pName, pValue)
+
+	Let AV.TableName = If(Len('$(pTable)')<1,'Variables', '$(pTable)');						// Check if parameters have a value. If not use default.
+	Let AV.NameField = If(Len('$(pName)')<1,'Variable', '$(pName)');						// Default = 'Variables','Variable','Expression'
+	Let AV.ExpressionField = If(Len('$(pValue)')<1,'Expression', '$(pValue)');
+	Set v = 0;
+
+
+	For v = 0 to NoOfRows('$(AV.TableName)')-1												// Figure out how many variables there are in 'Variables' table
+
+		Let AT.Variable = peek('$(AV.NameField)',$(v),'$(AV.TableName)');					// Assign variable name to 'vVariable'
+		Let '$(AT.Variable)' = peek('$(AV.ExpressionField)',$(v),'$(AV.TableName)');		// Give above variable name its corresponding value in 'Variables' table using field 'Expression'
+																							
+	next v;																					// Move on to the next variable.
+
+	pTable=;pName=;pValue=;AV.TableName=;AV.NameField=;AV.ExpressionField=;v=;
+	
+EndSub;

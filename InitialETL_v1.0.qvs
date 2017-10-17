@@ -1,0 +1,279 @@
+//	*********************************************************************************************************************************************************
+//	**
+//	**		InitialETL 
+//	**
+//	*********************************************************************************************************************************************************
+
+/************************************************************************************************************************************************************
+
+	SUBROUTINE: 	InitialETL('MetadataFile','DBTable','QlikTable','DB', Logging Flag, Error Mode, Historical Flag, Row Limit)
+	DESCRIPTION: 	Subroutine to extract tables out of a database and store them into a QVD and log the result. This is used with a metadata that can be
+					stored in the database itself or in an excel spreadsheet. 
+					
+	Dependencies:	Subroutines: 	InitialETL_Metadata [Load the metadata define what to extract out of the database.]
+									InitialETL_Preparation [ Generates the mapping tables to rename the DB fields into the preffered Qlik names.]
+									InitialETL_Execution [Generates load script and log file for extraction.]
+									
+	USAGE: 			CALL InitialETL(Peek('TableName',tableIndex,'Tables') , Peek('QlikTable',tableIndex,'Tables') , Peek('DB',tableIndex,'Tables'),0,0,100);
+	
+	WorkFlow:		InitialETL_Metadata > InitialETL_Preparation > Inital_ETL_Execution
+	
+	Version Infomation:
+		
+		1.1 		Initial Build. Adaption of Database_Extact.qvs to use spreadsheet meta data rather than DB tables. 
+		
+		1.2			Added the inclusion of LoadDate so we can use this in our template DB.
+		
+		1.3			Moved all dependent include script sub routines to within this script for ease of readability and understanding. 
+
+*************************************************************************************************************************************************************/
+
+//	*********************************************************************************************************************************************************
+//	**
+//	**			DEPENDENCIES START
+//	**
+//	*********************************************************************************************************************************************************
+	
+
+//	**************************************************************************************************************
+//	**
+//	**		SQL Metadata Load
+//	**
+//	**************************************************************************************************************
+
+/*
+
+	This subroutine loads metadata from a spreadsheet that will be used in a parent subroutine InitialETL. 
+	This data contains the source field names, source table names, and the names that will be used in QlikView,
+	as well as the dataTypes of these fields.
+	
+*/	
+
+Sub InitialETL_Metadata(MetadataFile, Application, Version)
+
+
+		Tables:
+		LOAD 
+		     SourceTable												AS TableName,					//	DB table name. 
+		     QlikTable													AS QlikTable,					//	QV table name. 
+		     TableComment												AS TableComment, 				//	Table metadata.
+		     DB															AS DB,							//	DB name.
+			 Application												AS Application					//	Qlik ETL application name			 
+		FROM 
+			[$(MetadataFile)](ooxml, embedded labels, table is Tables)
+		Where 
+			Application = '$(Application)';
+		
+
+		FieldTable_Map:
+		Mapping LOAD 
+		     TableName													AS TableName, 					//	Key used to bring in QV table.
+		     QlikTable													AS QlikTable 					//	QV table name which will be used  																										//	as part of a key during the load.
+		Resident
+			 Tables;
+
+
+		Fields:
+		LOAD
+		 	 TableName													AS TableName,  					//	DB table name.
+		     ColumnID													AS ColumnID, 					//	DB field id.
+		     ColumnName													AS ColumnName, 					//	DB field name.
+		     FieldName													AS FieldName, 					//	QV field name.
+			 Applymap('FieldTable_Map',TableName)&'|'& ColumnName		AS QlikTable_ColumnName, 		//	Link field used to rename DB fields to QV names. This allows us to have similar named columns in the db. 
+		     Type														AS Type, 						//	Field data Type.[QV: Num,Text,Date] 
+		     FieldComment												AS FieldComment 				//	Field metadata.	
+		FROM 
+			[$(MetadataFile)](ooxml, embedded labels, table is Columns)
+		Where 
+			Exists(TableName, TableName) AND Version = $(Version);										// Version relating to the ETL data. Version is specified in the call.																					
+																										// Applcation referring to the QV applicaton making the call.
+	
+
+
+EndSub
+
+
+//	**************************************************************************************************************
+//	**
+//	**		SQL ETL Prep
+//	**
+//	**************************************************************************************************************
+
+/*
+	This is used to create two mapping tables. One to rename the columns to what we want them called in QV. The other is to comment the fields themselves.
+	We currently do not add metadata to fields, but this gives us the capability to do it easily.
+*/
+
+	SUB InitialETL_Preparation
+
+		[MAP_ADD_COMMENTS]:
+			MAPPING LOAD
+				FieldName 																	AS FIELD,		// Key to match metadata to field
+				'__________________________________________' & Chr(10) & 
+				'  COMMENT: ' & Chr(10) & '  ' & FieldComment & Chr(10) & 									//	Field Metadata:
+				'__________________________________________' & Chr(10) &									//	This can be tailored to whatever
+				'  BUSINESS RULE: ' & Chr(10) & '  ' & FieldComment & Chr(10) & 							//	the business need is. Currently,
+				'__________________________________________' & Chr(10) & 									//	this is a placeholder to show how
+				'  SOURCE: ' & Chr(10) & '  ' & TableName & '.' & ColumnName &								//	the outcome is.
+				'.'  & Chr(10)& Chr(10)														AS COMMENTS						
+			RESIDENT
+				[Fields];	
+	
+		
+		[MAP_NAME_Fields]:																					// Used to rename fields.
+			MAPPING LOAD
+				[QlikTable_ColumnName],																		//	TableName|FieldName key to use for field renaming.
+				[FieldName] 																				//	QV Field Name. (What it will be renamed to.)				
+			RESIDENT
+				[Fields];
+		
+	ENDSUB
+
+
+//	**************************************************************************************************************
+//	**
+//	**		Initial ETL Execution
+//	**
+//	**************************************************************************************************************
+
+/************************************************************************************************************************************************************
+
+	SUBROUTINE: 	InitialETL_Execution('DBTable','QlikTable','DB')
+	DESCRIPTION: 	Subroutine to generate a load script to use for extraction from database. This then renames the fields to the ones specified in the
+					metadata. Lastly, it creates a log record which gets inserted into a database.
+	Dependencies:	Subroutines: 	InitialETL_Metadata [Load the metadata define what to extract out of the database.]
+									InitialETL_Preparation [ Generates the mapping tables to rename the DB fields into the preffered Qlik names.]
+	USAGE: 			CALL InitialETL_Execution(Peek('$(DBTableField)',i, '$(ETLTable)'),Peek('$(QlikTableField)',i, '$(ETLTable)'),Peek('$(DBField)',i, '$(ETLTable)');
+
+*************************************************************************************************************************************************************/
+	
+//  ****************************************************************************
+//	**		Creates load scripts and loads them into a table
+//  ****************************************************************************
+
+	SUB InitialETL_Execution(DBTable, QlikTable, DB)																																		// This is for a single table:
+	
+		[LOAD and SQL]:
+		LOAD																																												// Create load script:
+			'[$(QlikTable)]:' & Chr(10)																																						// QV Table Name
+			& 'LOAD ' & Chr(10) & '     ' & Concat(DISTINCT Type & '([' & ColumnName & ']) AS [' & QlikTable_ColumnName & ']', ',' & Chr(10) & '    ' , ColumnID) & ' ; ' & Chr(10)			// Preceding load script [Num(Sales)
+			& 'SQL ' & Chr(10) & '  SELECT $(SelectTop)' & Chr(10) & '    [' & Concat(DISTINCT ColumnName , '],' & Chr(10) & '    [' , ColumnID) & ']' & Chr(10) 							// SQL Statement
+			& '  FROM' & Chr(10) & '    $(DB).$(DBTable); ' & Chr(10) AS LOAD_AND_SQL_STATEMENT																								// 
+		RESIDENT																																											// Above is populating a table
+			[Fields]																																										// with load scripts used later
+		WHERE																																												// for each table.
+			TableName = '$(DBTable)'
+		GROUP BY
+			TableName;
+		
+//  ****************************************************************************
+//	**		Load, Mapping ,and Logging
+//  ****************************************************************************
+
+		LET vNoOfRows = 0;
+		Let vFilesize = 0;
+		LET vNoOfOutputRows = 0;
+		LET vLoadDateField = Num(Floor(today()));																																			// Determine Load Date, formatted as a number.
+		LET vLoadDateFileName = '_'&Date(today(),'YYYY_MM_DD');																																// Create filename prefix variable (Historical QVDs)
+	 	LET LoadSQL = LoadSQL & 																																							// Create final script:
+	 		Peek('LOAD_AND_SQL_STATEMENT',0,'LOAD and SQL') &																																// Load from DB.
+			'RENAME Fields USING [MAP_NAME_Fields];' & Chr(10) &																															// Rename fields using mapping table.
+			'COMMENT Fields USING [MAP_ADD_COMMENTS];' & Chr(10) &																															// Add metadata to fields (Comments).
+
+			'  Outer Join($(QlikTable))' & Chr(10) &																																		// Use a preceding load on an inline table 
+			'  LOAD *, ''$(vLoadDateField)'' AS LoadDate;' & Chr(10) &																														// with a dummy record to enter load date into
+			'  LOAD * INLINE [LoadDate_tmp' & Chr(10) &																																		// a temp table. Use that to append load date to 
+			'  1];' & Chr(10) &																																								// every row in real table.
+			'  Drop Field LoadDate_tmp;' & Chr(10) &																																		// Delete dummy value.
+			
+			'IF HistoricalFlag THEN' & Chr(10) &																																			// If True, follow archiving process:
+			'  STORE [$(QlikTable)] INTO ''$(QVDDir)$(QlikTable)$(vLoadDateFileName).qvd'' (QVD);' & Chr(10) & 																			// Store table into QVD with Load Date at the end.
+			'ELSE' & Chr(10) &																																								// If current:
+			'  STORE [$(QlikTable)] INTO ''$(QVDDir)$(QlikTable).qvd'' (QVD);' & Chr(10) &																									// Store tables into QVDs without date appended.
+			'ENDIF' & Chr(10) &																																								// End Historical/Current Check
+			
+			'IF Logging THEN' & Chr(10) &																																					// If True, log the following:
+			'  Let vNoOfRows = NoOfRows(''$(QlikTable)'');' & Chr(10) &																														// Rows of table.
+			'  Let vNoOfOutputRows = vNoOfOutputRows + vNoOfRows;' & Chr(10) &																										// Aggregate of rows of all tables.
+			'  Let now = Date(Now(),''YYYY-MM-DD hh:mm:ss'');' & Chr(10) &																													// Table run timestamp.
+			'  Let vFileSize = FileSize(''$(QVDDir)$(QlikTable).qvd'');' & Chr(10) &																										// QVD size.
+			'  Let vQVDSize = vQVDSize + vFileSize;' & Chr(10) &																														// Aggregate size of all QVDs generated.
+			'//  SQL INSERT INTO $(DB).QlikETL_Log VALUES(''$(DBTable)'',''$(QlikTable)'',$' & '(fileSize),''LOADED'',$' &																	// Create SQL INSERT statement w/ log information.
+			'//(noOfRows),''QET1'',''$' & '(BatchStart)'',''$' & '(now)'');' & Chr(10) & 																										// Insert into logging table
+			'  noOfRows=; now=; fileSize=;' & Chr(10) &																																		// Variable clean up [Aggregate variables stay]
+			'ENDIF' & Chr(10) &
+			
+			'DROP TABLE [$(QlikTable)];' & Chr(10) & Chr(10)																																// Table clean up
+			;
+		DROP TABLE [LOAD and SQL];																																							// Subroutine clean up.																																				
+		
+	ENDSUB
+
+	
+//	*********************************************************************************************************************************************************
+//	**
+//	**			DEPENDENCIES END
+//	**
+//	*********************************************************************************************************************************************************	
+
+//	**************************************************************************************************************
+//	**
+//	**		Initial ETL 
+//	**
+//	**************************************************************************************************************
+	
+//	**************************************************************************************************************
+//	**	- This script is used to load the tables and their fields/aliases used in SQL extraction subroutine		
+//	**************************************************************************************************************
+
+	SUB InitialETL(MetadataFile, QVDDir, Application, Version, Logging, ErrorMode, HistoricalFlag, SelectTop)
+
+//  ****************************************************************************
+//	**		Prep
+//  ****************************************************************************
+
+	Call InitialETL_Metadata('$(MetadataFile)','$(Application)',$(Version));
+
+	Let QVDDir = If(Len(Trim('$(QVDDir)')) < 1 , '..\QVD\', '$(QVDDir)');								//	Table containing subroutine load metadata (Table names, field names, etc..) Ex. 'Tables'
+	Set ETLTable = 'Tables';																			//	Table containing subroutine load metadata (Table names, field names, etc..) Ex. 'Tables'
+	Set DBTableField = 'TableName';																		//	Field containing DB table names. Ex. 'TableName'
+	Set QlikTableField = 'QlikTable';																	//	Field containing new QV table names. Ex. 'QlikTable'
+	Set DBField = 'DB';																					//	Field containing DB name. Ex. 'DB'
+	Let Application = If(Len(Trim($(Application))) < 1 , DocumentName(), '$(Application)');
+
+	Let SelectTop = If(Len(Trim('$(SelectTop)')) < 1 , '', 'TOP('&'$(SelectTop)'&')');					//	Row limiter, defines max amount of rows to be loaded for each table. Ex. 1000
+	Let BatchStart = Date(Now(),'YYYY-MM-DD hh:mm:ss');													//	Sets variable to track when batch load starts.
+	Let Logging = If($(Logging) = 0, False(), True());													//	If yes, creates log and inserts it into a SQL table.
+	Let HistoricalFlag = If($(HistoricalFlag) = 0, False(), True());									//	If yes, create a LoadDate field for archiving purposes.
+	Set LoadSQL = '';																					//	Empties variable used in routine.
+	Let ErrorMode = If(Len(Trim($(ErrorMode))) > 0, $(ErrorMode), 0);									//	Defines error mode. Set to 0 if not specified. Ex. 1	
+	Let vNoOfOutputRows = 0;																			//	Empties aggregate variable to track total number of rows loaded.
+	Set vQVDSize = 0;																					//	Empties aggregate variable to track total size of all QVDs created.
+	If  HistoricalFlag AND Len('$(vHistoricalQVDDir)') > 0 Then 										//	If this is a historical extract app, change QVD directory.
+		Let vQVDDir = '$(vHistoricalQVDDir)';
+	ENDIF
+
+	CALL InitialETL_Preparation;																		//	Loads the data used for the load script. [Table names, fields, new names, etc..]
+	
+//  ****************************************************************************
+//	**		Load, Mapping ,and Loging
+//  ****************************************************************************		
+		
+		For i = 0 To NoOfRows('$(ETLTable)')-1															// For number of defined tables, generate a load script. [SQL Select, Rename, Store into QVD, Drop]
+		
+			CALL InitialETL_Execution(Peek('$(DBTableField)',i, '$(ETLTable)'),Peek('$(QlikTableField)',i, '$(ETLTable)'),Peek('$(DBField)',i, '$(ETLTable)'))
+	
+		Next
+		
+		$(LoadSQL);																						// Execute load script which contains all scripts generated above.																	
+		
+//  ****************************************************************************
+//	**		Cleanup
+//  ****************************************************************************		
+		
+		LoadSQL=;version=;i=;Logging=;maxTableNo=;BatchStart=;ETLTable=;DBTableField=;
+		QlikTableField=;DBField=;DBTable=;QlikTable=;DB=;HistoricalFlag=;SelectTop=;vLoadDateFileName=;	//	Variable clean up.
+	
+		DROP Tables Fields, Tables;																		// Table clean up.
+		
+	ENDSUB
