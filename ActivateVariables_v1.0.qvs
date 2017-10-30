@@ -1,4 +1,4 @@
-﻿///$tab ActivateVariables
+///$tab ActivateVariables
 /************************************************************************************************************************************************************
 
 	SUBROUTINE: 	ActivateVariables('VariableTable','VariableField','ExpressionField')
